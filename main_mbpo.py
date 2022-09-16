@@ -4,6 +4,8 @@ import gym
 import torch
 import numpy as np
 from itertools import count
+import gym_minigrid
+import pandas as pd
 
 import logging
 
@@ -18,13 +20,16 @@ from predict_env import PredictEnv
 from sample_env import EnvSampler
 from tf_models.constructor import construct_model, format_samples_for_training
 
+from results.julian_utils import *
+from envs import *
+import os
 
 def readParser():
     parser = argparse.ArgumentParser(description='MBPO')
     parser.add_argument('--env_name', default="Hopper-v2",
                         help='Mujoco Gym environment (default: Hopper-v2)')
-    parser.add_argument('--seed', type=int, default=123456, metavar='N',
-                        help='random seed (default: 123456)')
+    parser.add_argument('--seed', type=int, default=1, metavar='N',
+                        help='random seed (default: 1)')
 
     parser.add_argument('--use_decay', type=bool, default=True, metavar='G',
                         help='discount factor for reward (default: 0.99)')
@@ -93,6 +98,12 @@ def readParser():
                         help='exploration steps initially')
     parser.add_argument('--max_path_length', type=int, default=1000, metavar='A',
                         help='max length of path')
+                        #! Julian
+    parser.add_argument('--minigrid', default=False, metavar='A',
+                        help='max length of path')
+    parser.add_argument('--logdir', default='default' , metavar='A',
+                        help='logging directory')
+                        #! 
 
 
     parser.add_argument('--model_type', default='tensorflow', metavar='A',
@@ -108,13 +119,13 @@ def train(args, env_sampler, predict_env, agent, env_pool, model_pool):
     reward_sum = 0
     rollout_length = 1
     exploration_before_start(args, env_sampler, env_pool, agent)
-
+    metrics = {}
     for epoch_step in range(args.num_epoch):
+        print('epoch step:', epoch_step)
         start_step = total_step
         train_policy_steps = 0
         for i in count():
             cur_step = total_step - start_step
-
             if cur_step >= args.epoch_length and len(env_pool) > args.min_pool_size:
                 break
 
@@ -125,39 +136,44 @@ def train(args, env_sampler, predict_env, agent, env_pool, model_pool):
                 if rollout_length != new_rollout_length:
                     rollout_length = new_rollout_length
                     model_pool = resize_model_pool(args, rollout_length, model_pool)
-
                 rollout_model(args, predict_env, agent, model_pool, env_pool, rollout_length)
-
             cur_state, action, next_state, reward, done, info = env_sampler.sample(agent)
             env_pool.push(cur_state, action, reward, next_state, done)
-
             if len(env_pool) > args.min_pool_size:
-                train_policy_steps += train_policy_repeats(args, total_step, train_policy_steps, cur_step, env_pool, model_pool, agent)
+                train_policy_steps += train_policy_repeats(args, total_step, train_policy_steps, cur_step, env_pool, model_pool, agent, )
 
             total_step += 1
 
             if total_step % args.epoch_length == 0:
-                '''
+                #?
                 avg_reward_len = min(len(env_sampler.path_rewards), 5)
                 avg_reward = sum(env_sampler.path_rewards[-avg_reward_len:]) / avg_reward_len
-                logging.info("Step Reward: " + str(total_step) + " " + str(env_sampler.path_rewards[-1]) + " " + str(avg_reward))
+                # logging.info("Step Reward: " + str(total_step) + " " + str(env_sampler.path_rewards[-1]) + " " + str(avg_reward))
                 print(total_step, env_sampler.path_rewards[-1], avg_reward)
-                '''
+                #?
                 env_sampler.current_state = None
                 sum_reward = 0
                 done = False
                 test_step = 0
 
                 while (not done) and (test_step != args.max_path_length):
-                    cur_state, action, next_state, reward, done, info = env_sampler.sample(agent, eval_t=True)
+                    # cur_state, action, next_state, reward, done, info = env_sampler.sample(agent, eval_t=True)
+                    cur_state, action, next_state, reward, done, info = env_sampler.sample(agent, eval_t=False) #? TODO: change to eval_t = False only for one hot encoded actions because when true, the action only gives the mean, and the mean probabilities does not make sense for one_hot encoded actions
+
                     sum_reward += reward
                     test_step += 1
                 # logger.record_tabular("total_step", total_step)
                 # logger.record_tabular("sum_reward", sum_reward)
                 # logger.dump_tabular()
-                logging.info("Step Reward: " + str(total_step) + " " + str(sum_reward))
+                # logging.info("Step Reward: " + str(total_step) + " " + str(sum_reward))
                 # print(total_step, sum_reward)
+                
+                metrics['rewards'] = [avg_reward] ; metrics['epoch']  = [total_step]
+                save_metrics(metrics, f'logs/{args.env_name}/{args.logdir}/{args.seed}') 
 
+            if total_step % args.epoch_length*10 == 0:
+                agent.save_model(args.env_name)
+                predict_env.model.save_model(args.env_name)
 
 def exploration_before_start(args, env_sampler, env_pool, agent):
     for i in range(args.init_exploration_steps):
@@ -175,9 +191,21 @@ def set_rollout_length(args, epoch_step):
 def train_predict_model(args, env_pool, predict_env):
     # Get all samples from environment
     state, action, reward, next_state, done = env_pool.sample(len(env_pool))
+    #??
+    state = state.reshape((state.shape[0], -1))
+    next_state = next_state.reshape((next_state.shape[0], -1))
+    #?
     delta_state = next_state - state
     inputs = np.concatenate((state, action), axis=-1)
-    labels = np.concatenate((np.reshape(reward, (reward.shape[0], -1)), delta_state), axis=-1)
+    #??
+    if predict_env.terminal_use:                  
+        done = np.array(done, dtype=reward.dtype)
+        labels = np.concatenate((np.reshape(reward, (reward.shape[0], -1)), np.reshape(done, (done.shape[0], -1)), delta_state), axis=-1)  
+    else:
+        labels = np.concatenate((np.reshape(reward, (reward.shape[0], -1)), delta_state), axis=-1)
+
+    #?
+
 
     predict_env.model.train(inputs, labels, batch_size=256, holdout_ratio=0.2)
 
@@ -223,6 +251,7 @@ def train_policy_repeats(args, total_step, train_step, cur_step, env_pool, model
 
         if model_batch_size > 0 and len(model_pool) > 0:
             model_state, model_action, model_reward, model_next_state, model_done = model_pool.sample_all_batch(int(model_batch_size))
+            model_next_state = model_next_state.reshape((torch.Size([-1]) + env_next_state.shape[1:]))
             batch_state, batch_action, batch_reward, batch_next_state, batch_done = np.concatenate((env_state, model_state), axis=0), \
                                                                                     np.concatenate((env_action, model_action),
                                                                                                    axis=0), np.concatenate(
@@ -243,54 +272,44 @@ def train_policy_repeats(args, total_step, train_step, cur_step, env_pool, model
 from gym.spaces import Box
 
 
-class SingleEnvWrapper(gym.Wrapper):
-    def __init__(self, env):
-        super(SingleEnvWrapper, self).__init__(env)
-        obs_dim = env.observation_space.shape[0]
-        obs_dim += 2
-        self.observation_space = Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
-
-    def step(self, action):
-        obs, reward, done, info = self.env.step(action)
-        torso_height, torso_ang = self.env.sim.data.qpos[1:3]  # Need this in the obs for determining when to stop
-        obs = np.append(obs, [torso_height, torso_ang])
-
-        return obs, reward, done, info
-
-    def reset(self):
-        obs = self.env.reset()
-        torso_height, torso_ang = self.env.sim.data.qpos[1:3]
-        obs = np.append(obs, [torso_height, torso_ang])
-        return obs
-
-
 def main(args=None):
     if args is None:
         args = readParser()
 
     # Initial environment
     env = gym.make(args.env_name)
+    if args.minigrid:
+        env = SingleEnvWrapper(env)
+        env = OneHotAction(env)
+        terminal_use = 1 #1=True, meaning that for PredEnv, .sampling() concatenates information about environment step being terminal (done=True). 
 
     # Set random seed
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-    env.seed(args.seed)
+    if args.minigrid == False:
+        env.seed(args.seed)
+        terminal_use = 0               #0=False, meaning that for PredEnv, sampling.() does not concatenate information about environment step being terminal (done=True).  Typically mujoco does not need it because from the observation you can infer if it is done, whereas for minigrid you can't and therefore require the information.
 
     # Intial agent
-    agent = SAC(env.observation_space.shape[0], env.action_space, args)
+    agent = SAC(env.observation_space.shape, env.action_space, args)
+    if os.path.exists(args.logdir):
+        agent.load_model(args.env_name)
+
 
     # Initial ensemble model
     state_size = np.prod(env.observation_space.shape)
     action_size = np.prod(env.action_space.shape)
     if args.model_type == 'pytorch':
         env_model = EnsembleDynamicsModel(args.num_networks, args.num_elites, state_size, action_size, args.reward_size, args.pred_hidden_size,
-                                          use_decay=args.use_decay)
+                                          use_decay=args.use_decay, terminal_size = terminal_use, seed=args.seed, logdir=args.logdir)
+        if os.path.exists(args.logdir):
+            env_model.load_model(args.env_name)
     else:
         env_model = construct_model(obs_dim=state_size, act_dim=action_size, hidden_dim=args.pred_hidden_size, num_networks=args.num_networks,
                                     num_elites=args.num_elites)
 
     # Predict environments
-    predict_env = PredictEnv(env_model, args.env_name, args.model_type)
+    predict_env = PredictEnv(env_model, args.env_name, args.model_type, terminal_use)
 
     # Initial pool for env
     env_pool = ReplayMemory(args.replay_size)
@@ -302,7 +321,6 @@ def main(args=None):
 
     # Sampler of environment
     env_sampler = EnvSampler(env, max_path_length=args.max_path_length)
-
     train(args, env_sampler, predict_env, agent, env_pool, model_pool)
 
 

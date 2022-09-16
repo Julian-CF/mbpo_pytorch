@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributions import Normal
+from torch.distributions import Normal, OneHotCategoricalStraightThrough
 
 LOG_SIG_MAX = 2
 LOG_SIG_MIN = -20
@@ -18,6 +18,17 @@ class ValueNetwork(nn.Module):
     def __init__(self, num_inputs, hidden_dim):
         super(ValueNetwork, self).__init__()
 
+
+        # self.image_conv = nn.Sequential(
+        #     nn.Conv2d(3, 16, (2, 2)),
+        #     nn.ReLU(),
+        #     nn.MaxPool2d((2, 2)),
+        #     nn.Conv2d(16, 64, (3, 3)),
+        #     nn.ReLU()
+        # )
+        # n = num_inputs[0]
+        # m = num_inputs[1]
+        # num_inputs =  ((n-1)//2-2)*((m-1)//2-2)*64
         self.linear1 = nn.Linear(num_inputs, hidden_dim)
         self.linear2 = nn.Linear(hidden_dim, hidden_dim)
         self.linear3 = nn.Linear(hidden_dim, 1)
@@ -25,6 +36,11 @@ class ValueNetwork(nn.Module):
         self.apply(weights_init_)
 
     def forward(self, state):
+        # x = state.image.transpose(1, 3).transpose(2, 3)
+        # x = self.image_conv(x)
+        # x = x.reshape(x.shape[0], -1)  
+
+        state = state.reshape((state.shape[0],-1))  
         x = F.relu(self.linear1(state))
         x = F.relu(self.linear2(x))
         x = self.linear3(x)
@@ -48,7 +64,8 @@ class QNetwork(nn.Module):
         self.apply(weights_init_)
 
     def forward(self, state, action):
-        xu = torch.cat([state, action], 1)
+        # xu = torch.cat([state, action], 1)
+        xu = torch.cat([state.reshape((state.shape[0], -1)), action], 1)
         
         x1 = F.relu(self.linear1(xu))
         x1 = F.relu(self.linear2(x1))
@@ -147,4 +164,58 @@ class DeterministicPolicy(nn.Module):
     def to(self, device):
         self.action_scale = self.action_scale.to(device)
         self.action_bias = self.action_bias.to(device)
-        return super(GaussianPolicy, self).to(device)
+        # import ipdb; ipdb.set_trace()
+        return super(DeterministicPolicy, self).to(device)
+
+
+class OneHotDist(nn.Module):
+    def __init__(self, num_inputs, num_actions, hidden_dim, action_space=None, obs_space=None):
+        super(OneHotDist, self).__init__()
+        self.linear1 = nn.Linear(num_inputs, hidden_dim)
+        self.linear2 = nn.Linear(hidden_dim, hidden_dim)
+        self.mean_linear = nn.Linear(hidden_dim, num_actions)
+        # self.log_std_linear = nn.Linear(hidden_dim, num_actions)
+        self._obs_space = obs_space
+        self.apply(weights_init_)
+
+        # action rescaling --- #! Not used here
+        # if action_space is None:
+        self.action_scale = torch.tensor(1.)
+        self.action_bias = torch.tensor(0.)
+        # else:
+        #     self.action_scale = torch.FloatTensor(
+        #         (action_space.high - action_space.low) / 2.)
+        #     self.action_bias = torch.FloatTensor(
+        #         (action_space.high + action_space.low) / 2.)
+
+    def forward(self, state):
+        # shape = state.shape[:-len(self._obs_space)]  + torch.Size([-1])
+        if len(state.shape) > len(self._obs_space):
+            shape = state.shape[:-len(self._obs_space)]  + torch.Size([-1])
+            state = state.reshape((shape))  
+        x = F.relu(self.linear1(state))
+        x = F.relu(self.linear2(x))
+        mean = torch.tanh(self.mean_linear(x))
+        # mean = torch.tanh(self.mean_linear(x)) * self.action_scale + self.action_bias  #! not using action bias/scale
+
+        return mean
+
+    def sample(self, state):
+        mean = self.forward(state)
+        onehot_dist = OneHotCategoricalStraightThrough(logits=mean)
+        # x_t = onehot_dist.rsample()  # for reparameterization trick!
+        # y_t = torch.tanh(x_t)
+        # action = y_t * self.action_scale + self.action_bias  #!  Not using action bias/scale because set to 1,0
+        action = x_t = y_t = onehot_dist.rsample()
+        log_prob = onehot_dist.log_prob(x_t)
+        # Enforcing Action Bound
+        log_prob = log_prob.unsqueeze(axis=-1) - torch.log(self.action_scale * (1 - y_t.pow(2)) + epsilon)
+        log_prob = log_prob.sum(1, keepdim=True)
+        mean = torch.tanh(mean) * self.action_scale + self.action_bias
+        
+        return action, log_prob, mean
+
+    def to(self, device):
+        self.action_scale = self.action_scale.to(device)
+        self.action_bias = self.action_bias.to(device)
+        return super(OneHotDist, self).to(device)

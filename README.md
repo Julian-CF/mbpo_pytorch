@@ -16,6 +16,8 @@ MuJoCo 1.5 & MuJoCo 2.0
 
 > python main_mbpo.py --env_name 'Hopper-v2' --num_epoch 300 --model_type 'pytorch'
 
+> python3 main_mbpo.py --env_name MiniGrid-DoorKey-5x5-v0 --num_epoch 300 --model_type 'pytorch' --policy OneHotCateg --minigrid True --logdir default     #Julian run on minigrid
+
 ## Reference
 * Official tensorflow implementation: https://github.com/JannerM/mbpo
 * Code to the reproducibility challenge paper: https://github.com/jxu43/replication-mbpo

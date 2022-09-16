@@ -8,6 +8,7 @@ import numpy as np
 import math
 import gzip
 import itertools
+import os
 
 device = torch.device('cuda')
 
@@ -107,11 +108,11 @@ class EnsembleFC(nn.Module):
     def extra_repr(self) -> str:
         return 'in_features={}, out_features={}, bias={}'.format(
             self.in_features, self.out_features, self.bias is not None
-        )
+)
 
 
 class EnsembleModel(nn.Module):
-    def __init__(self, state_size, action_size, reward_size, ensemble_size, hidden_size=200, learning_rate=1e-3, use_decay=False):
+    def __init__(self, state_size, action_size, reward_size, ensemble_size, hidden_size=200, learning_rate=1e-3, use_decay=False, terminal_size=0):
         super(EnsembleModel, self).__init__()
         self.hidden_size = hidden_size
         self.nn1 = EnsembleFC(state_size + action_size, hidden_size, ensemble_size, weight_decay=0.000025)
@@ -120,7 +121,8 @@ class EnsembleModel(nn.Module):
         self.nn4 = EnsembleFC(hidden_size, hidden_size, ensemble_size, weight_decay=0.000075)
         self.use_decay = use_decay
 
-        self.output_dim = state_size + reward_size
+
+        self.output_dim = state_size + reward_size + terminal_size #? +1 is for done
         # Add variance output
         self.nn5 = EnsembleFC(hidden_size, self.output_dim * 2, ensemble_size, weight_decay=0.0001)
 
@@ -188,7 +190,7 @@ class EnsembleModel(nn.Module):
 
 
 class EnsembleDynamicsModel():
-    def __init__(self, network_size, elite_size, state_size, action_size, reward_size=1, hidden_size=200, use_decay=False):
+    def __init__(self, network_size, elite_size, state_size, action_size, reward_size=1, hidden_size=200, use_decay=False, terminal_size=0, seed=1, logdir='DIDNT SPECIFY path'):
         self.network_size = network_size
         self.elite_size = elite_size
         self.model_list = []
@@ -197,8 +199,11 @@ class EnsembleDynamicsModel():
         self.reward_size = reward_size
         self.network_size = network_size
         self.elite_model_idxes = []
-        self.ensemble_model = EnsembleModel(state_size, action_size, reward_size, network_size, hidden_size, use_decay=use_decay)
+        self.ensemble_model = EnsembleModel(state_size, action_size, reward_size, network_size, hidden_size, use_decay=use_decay, terminal_size=terminal_size)
         self.scaler = StandardScaler()
+
+        self.seed = seed
+        self.dir = logdir
 
     def train(self, inputs, labels, batch_size=256, holdout_ratio=0., max_epochs_since_update=5):
         self._max_epochs_since_update = max_epochs_since_update
@@ -241,7 +246,7 @@ class EnsembleDynamicsModel():
                 _, holdout_mse_losses = self.ensemble_model.loss(holdout_mean, holdout_logvar, holdout_labels, inc_var_loss=False)
                 holdout_mse_losses = holdout_mse_losses.detach().cpu().numpy()
                 sorted_loss_idx = np.argsort(holdout_mse_losses)
-                self.elite_model_idxes = sorted_loss_idx[:self.elite_size].tolist()
+                self.elite_model_idxes = sorted_loss_idx[:self.elite_size].tolist()        #Keep the best const=.elite_size idxes of the ensemble preds
                 break_train = self._save_best(epoch, holdout_mse_losses)
                 if break_train:
                     break
@@ -286,6 +291,24 @@ class EnsembleDynamicsModel():
             mean = torch.mean(ensemble_mean, dim=0)
             var = torch.mean(ensemble_var, dim=0) + torch.mean(torch.square(ensemble_mean - mean[None, :, :]), dim=0)
             return mean, var
+
+    # Save model parameters
+    def save_model(self, env_name, ensemble_path=None):
+        if not os.path.exists(f'logs/{env_name}/{self.seed}'):
+            os.makedirs(f'logs/{env_name}/{self.seed}')
+        
+        if ensemble_path is None:
+            ensemble_path = f"logs/{env_name}/{self.dir}/{self.seed}/ensemble_dynamics"
+        print('Saving models to {}'.format(ensemble_path))
+        torch.save(self.ensemble_model.state_dict(), ensemble_path)
+
+    # Load model parameters
+    def load_model(self, env_name):
+        ensemble_path = f"logs/{env_name}/{self.dir}/{self.seed}/ensemble_dynamics"
+        print('Loaded models from {} '.format(ensemble_path))
+
+        if os.path.exists(ensemble_path):
+            self.ensemble_model.load_state_dict(torch.load(ensemble_path))
 
 
 class Swish(nn.Module):

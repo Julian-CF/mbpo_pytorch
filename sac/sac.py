@@ -3,21 +3,28 @@ import torch
 import torch.nn.functional as F
 from torch.optim import Adam
 from sac.utils import  soft_update, hard_update
-from sac.model import GaussianPolicy, QNetwork, DeterministicPolicy
-
+from sac.model import GaussianPolicy, QNetwork, DeterministicPolicy, OneHotDist
+import math
+from functools import reduce
+import operator
 
 class SAC(object):
     def __init__(self, num_inputs, action_space, args):
-        torch.autograd.set_detect_anomaly(True)
+        torch.autograd.set_detect_anomaly(False)
         self.gamma = args.gamma
         self.tau = args.tau
         self.alpha = args.alpha
+        self.seed = args.seed
+        self.dir = args.logdir
 
         self.policy_type = args.policy
         self.target_update_interval = args.target_update_interval
         self.automatic_entropy_tuning = args.automatic_entropy_tuning
 
         self.device = torch.device("cuda")
+
+        num_inputs_orig = num_inputs
+        num_inputs = reduce(operator.mul, num_inputs, 1) #= math.prod(num_inputs)     
 
         self.critic = QNetwork(num_inputs, action_space.shape[0], args.hidden_size).to(device=self.device)
         self.critic_optim = Adam(self.critic.parameters(), lr=args.lr)
@@ -35,6 +42,14 @@ class SAC(object):
             self.policy = GaussianPolicy(num_inputs, action_space.shape[0], args.hidden_size, action_space).to(self.device)
             self.policy_optim = Adam(self.policy.parameters(), lr=args.lr)
 
+        elif self.policy_type == "OneHotCateg":
+            if self.automatic_entropy_tuning == True:
+                self.target_entropy = -torch.prod(torch.Tensor(action_space.shape).to(self.device)).item()
+                self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
+                self.alpha_optim = Adam([self.log_alpha], lr=args.lr)
+
+            self.policy =  OneHotDist(num_inputs, action_space.shape[0], args.hidden_size, action_space, num_inputs_orig).to(self.device)
+            self.policy_optim = Adam(self.policy.parameters(), lr=args.lr)
         else:
             self.alpha = 0
             self.automatic_entropy_tuning = False
@@ -110,22 +125,25 @@ class SAC(object):
         return qf1_loss.item(), qf2_loss.item(), policy_loss.item(), alpha_loss.item(), alpha_tlogs.item()
 
     # Save model parameters
-    def save_model(self, env_name, suffix="", actor_path=None, critic_path=None):
-        if not os.path.exists('models/'):
-            os.makedirs('models/')
-
+    def save_model(self, env_name, actor_path=None, critic_path=None):
+        if not os.path.exists(f'logs/{env_name}/{self.seed}'):
+            os.makedirs(f'logs/{env_name}/{self.seed}')
+    
         if actor_path is None:
-            actor_path = "models/sac_actor_{}_{}".format(env_name, suffix)
+            actor_path = f"logs/{env_name}/{self.dir}/{self.seed}/sac_actor"
         if critic_path is None:
-            critic_path = "models/sac_critic_{}_{}".format(env_name, suffix)
+            critic_path = f"logs/{env_name}/{self.dir}/{self.seed}/sac_critic"
         print('Saving models to {} and {}'.format(actor_path, critic_path))
         torch.save(self.policy.state_dict(), actor_path)
         torch.save(self.critic.state_dict(), critic_path)
 
     # Load model parameters
-    def load_model(self, actor_path, critic_path):
-        print('Loading models from {} and {}'.format(actor_path, critic_path))
-        if actor_path is not None:
+    def load_model(self, env_name):
+        critic_path = f"logs/{env_name}/{self.dir}/{self.seed}/sac_critic"
+        actor_path = f"logs/{env_name}/{self.dir}/{self.seed}/sac_actor"
+        print('Loaded models from {} and {}'.format(actor_path, critic_path))
+
+        if os.path.exists(actor_path):
             self.policy.load_state_dict(torch.load(actor_path))
-        if critic_path is not None:
+        if os.path.exists(critic_path):
             self.critic.load_state_dict(torch.load(critic_path))

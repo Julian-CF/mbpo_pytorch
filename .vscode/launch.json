@@ -1,0 +1,19 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Current File",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "ws": "${workspaceFolder}",
+            "args": ["--env_name", "MiniGrid-DoorKey-5x5-v0", "--num_epoch", "300", "--model_type", "'pytorch'", "--policy", "OneHotCateg", "--minigrid", "True" ,"--logdir", "default"],
+            // "args": ["--env_name", "Walker2d-v2", "--num_epoch", "10", "--model_type", "'pytorch'"],
+            "console": "integratedTerminal",
+            "justMyCode": false
+        }
+    ]
+}

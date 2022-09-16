@@ -1,11 +1,12 @@
 import numpy as np
-
+import scipy
 
 class PredictEnv:
-    def __init__(self, model, env_name, model_type):
+    def __init__(self, model, env_name, model_type, terminal_use):
         self.model = model
         self.env_name = env_name
         self.model_type = model_type
+        self.terminal_use = bool(terminal_use)
 
     def _termination_fn(self, env_name, obs, act, next_obs):
         # TODO
@@ -74,12 +75,17 @@ class PredictEnv:
         else:
             return_single = False
 
+        obs_shape = obs.shape  
+        obs = obs.reshape(obs.shape[0], -1)
         inputs = np.concatenate((obs, act), axis=-1)
         if self.model_type == 'pytorch':
             ensemble_model_means, ensemble_model_vars = self.model.predict(inputs)
         else:
             ensemble_model_means, ensemble_model_vars = self.model.predict(inputs, factored=True)
-        ensemble_model_means[:, :, 1:] += obs
+        if self.terminal_use:
+            ensemble_model_means[:, :, 2:] += obs   
+        else:    
+            ensemble_model_means[:, :, 1:] += obs   
         ensemble_model_stds = np.sqrt(ensemble_model_vars)
 
         if deterministic:
@@ -89,7 +95,7 @@ class PredictEnv:
 
         num_models, batch_size, _ = ensemble_model_means.shape
         if self.model_type == 'pytorch':
-            model_idxes = np.random.choice(self.model.elite_model_idxes, size=batch_size)
+            model_idxes = np.random.choice(self.model.elite_model_idxes, size=batch_size)  #randomly picks through the best (elite) ensemble models. 
         else:
             model_idxes = self.model.random_inds(batch_size)
         batch_idxes = np.arange(0, batch_size)
@@ -100,12 +106,21 @@ class PredictEnv:
 
         log_prob, dev = self._get_logprob(samples, ensemble_model_means, ensemble_model_vars)
 
-        rewards, next_obs = samples[:, :1], samples[:, 1:]
-        terminals = self._termination_fn(self.env_name, obs, act, next_obs)
+        if self.terminal_use:  #concatenated in samples with next_obs and rewards instead of only rewards and next_obs 
+            rewards, terminals, next_obs = samples[:, :1], samples[:, 1]   , samples[:, 2:]     
+            terminals = np.where(scipy.special.softmax(terminals)> 0.5, True, False)
+            terminals = np.reshape(terminals, (terminals.shape[0], 1))
+        else:    
+            rewards, next_obs = samples[:, :1], samples[:, 1:]    
+            terminals = self._termination_fn(self.env_name, obs, act, next_obs)
 
         batch_size = model_means.shape[0]
-        return_means = np.concatenate((model_means[:, :1], terminals, model_means[:, 1:]), axis=-1)
-        return_stds = np.concatenate((model_stds[:, :1], np.zeros((batch_size, 1)), model_stds[:, 1:]), axis=-1)
+        if self.terminal_use == False:
+            return_means = np.concatenate((model_means[:, :1], terminals, model_means[:, 1:]), axis=-1)
+            return_stds = np.concatenate((model_stds[:, :1], np.zeros((batch_size, 1)), model_stds[:, 1:]), axis=-1)
+        else:  #? UNSURE
+            return_means = model_means
+            return_stds = model_stds
 
         if return_single:
             next_obs = next_obs[0]
@@ -114,5 +129,6 @@ class PredictEnv:
             rewards = rewards[0]
             terminals = terminals[0]
 
+
         info = {'mean': return_means, 'std': return_stds, 'log_prob': log_prob, 'dev': dev}
-        return next_obs, rewards, terminals, info
+        return next_obs.reshape(obs_shape), rewards, terminals, info
